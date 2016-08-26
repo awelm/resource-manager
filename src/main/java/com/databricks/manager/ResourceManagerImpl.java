@@ -2,23 +2,13 @@ package com.databricks.manager;
 
 import java.util.List;
 import java.util.ArrayList;
+import java.util.concurrent.*;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.concurrent.*;
-
-/*class getInstanceTask implements Runnable {
-    private CloudProvider provider;
-
-    public getInstanceTask(CloudProvider provider) {
-        this.provider = provider;
-    }
-
-    @Override
-    public void run() {
-        provider.getInstance();
-    }
-}*/
+import java.util.Set;
+import java.io.File;
+import java.io.FileWriter;
 
 /**
  * The resource manager should place and unplace containers onto instances. The resource manager
@@ -45,9 +35,13 @@ public class ResourceManagerImpl implements ResourceManager {
         this.containerSizeGB = containerSizeGB;
         this.containerInstance = new HashMap<ContainerId, Instance>();
         this.freeInstances = new HashSet<Instance>();
+        Set<Instance> previousState = provider.getAllInstances();
+        if (previousState.size() > 0) {
+            restoreState(previousState);
+        }
     }
 
-    public List<Instance> allocateInstances(int num) {
+    private List<Instance> allocateInstances(int num) {
         //allocate Instances in parallel
         Executor executor = Executors.newFixedThreadPool(num);
         CompletionService<Instance> completionService = new ExecutorCompletionService<Instance>(executor);
@@ -57,7 +51,7 @@ public class ResourceManagerImpl implements ResourceManager {
                     return provider.requestInstance();
                 }
             });
-         }
+        }
 
         int received = 0;
         List<Instance> instanceList = new ArrayList<Instance>();
@@ -66,13 +60,25 @@ public class ResourceManagerImpl implements ResourceManager {
                 Future<Instance> instanceFuture = completionService.take();
                 instanceList.add(instanceFuture.get());
             }
-            catch(Exception e) {
+            catch (Exception e) {
                 // Do some logging
-                System.out.println("ERROR OCCURRED WITH INSTANCE FUTURE");
+                System.err.println("ERROR OCCURRED WITH INSTANCE FUTURE");
             }
             received++;
         }
         return instanceList;
+    }
+
+    private void restoreState (Set<Instance> previousState) {
+        for (Instance i : previousState) {
+            List<ContainerId> containerIds = i.getAllContainers();
+            for (ContainerId containerId : containerIds) {
+                this.containerInstance.put(containerId, i); 
+            }
+            if (i.getRemainingMemoryGB() >= this.containerSizeGB) {
+                freeInstances.add(i);
+            }
+        }
     }
 
     /**
@@ -89,7 +95,7 @@ public class ResourceManagerImpl implements ResourceManager {
 
         //iterate through free instances and allocate containers
         Iterator<Instance> it = freeInstances.iterator();
-        while(it.hasNext() && containerIds.size() < numContainers) {
+        while (it.hasNext() && containerIds.size() < numContainers) {
             Instance i = it.next();
             //add as much as possible to current free instance
             while (i.getRemainingMemoryGB() >= containerSizeGB && containerIds.size() < numContainers) {
@@ -107,11 +113,11 @@ public class ResourceManagerImpl implements ResourceManager {
         if (containerIds.size() == numContainers)
             return containerIds;
 
-        
+
         int instancesNeeded = (int) Math.ceil((numContainers - containerIds.size()) * (this.containerSizeGB / this.instanceSizeGB));
         List<Instance> instanceList = allocateInstances(instancesNeeded);
 
-        for(Instance i : instanceList) {
+        for (Instance i : instanceList) {
             //add as many containers as possible to new instance
             while (i.getRemainingMemoryGB() >= containerSizeGB && containerIds.size() < numContainers) {
                 ContainerId newContainer = i.placeContainer(containerSizeGB);
